@@ -11,14 +11,14 @@ const { userModel } = require('./db/dbSchema');
 const axios = require('axios');
 const Redis = require('ioredis');
 const redisClient = new Redis();
+var cron = require('node-cron');
+const { automationModel } = require('./db/automateSchema');
+const { uploadToInsta } = require('./graphqlSchema/functions');
+const { campaignModel } = require('./db/postUrlSchema');
 
 require("./db/db")
 
 app.use(CookieParser());
-
-// app.use('/webhook', (req, res, next) => {
-//     next();
-// });
 app.use('/webhook', express.raw({ type: "*/*" }));
 app.use(bodyParser.json());
 app.use(express.urlencoded({ limit: "50mb" }))
@@ -79,6 +79,7 @@ app.post("/create-checkout", async (req, res) => {
 //Stripe Webhooks
 app.post('/webhook', async (request, response) => {
     // console.log(request.body);
+    // console.log("webhook")
 
     let event;
 
@@ -95,6 +96,7 @@ app.post('/webhook', async (request, response) => {
     // Handle the event
     switch (event.type) {
         case 'customer.subscription.created':
+            console.log("Created")
             // console.log(event.data.object);
             await userModel.updateOne({ stripe_customerId: event.data.object.customer }, { $set: { subscription_status: 'activated' } })
             break;
@@ -109,6 +111,74 @@ app.post('/webhook', async (request, response) => {
     // Return a 200 response to acknowledge receipt of the event
     response.send();
 });
+
+cron.schedule('* * * * *', async (date) => {
+    // console.log('1 min')
+    try {
+        let automatedCampaigns = await redisClient.get("Automation_campaigns");
+        automatedCampaigns = JSON.parse(automatedCampaigns);
+        // console.log(automatedCampaigns);
+        if (automatedCampaigns) {
+            // console.log("In here")
+            let automatedTasks = automatedCampaigns.filter(campaign => new Date(campaign.time).setSeconds(0, 0) === date.getTime())
+            let remainingTasks = automatedCampaigns.filter(campaign => new Date(campaign.time).setSeconds(0, 0) > date.getTime());
+            // console.log(remainingTasks)
+            redisClient.set("Automation_campaigns", JSON.stringify(remainingTasks));
+            // console.log(automatedTasks)
+
+            await Promise.all(automatedTasks.map(async (task) => {
+                if (task.instagramId) {
+                    try {
+                        const res = await uploadToInsta(task.instagramId, task.image, task.instagramCaption, task.InstagramToken)
+                        const alreadyCampaign = await campaignModel.findOne({ campaignId: task.campaignId });
+                        // console.log(alreadyCampaign)
+                        if (!alreadyCampaign) {
+                            const campaign = new campaignModel({ campaignId: task.campaignId, campaignName: task.campaignName, userId: task.userId, instagramPostId: res.data.id })
+                            await campaign.save();
+                            const response = await campaignModel.find({ userId: task.userId }).sort({ "date": 1 });
+                            redisClient.set(`${task.userId}`, JSON.stringify(response))
+                            await campaignModel.deleteOne({ _id: task._id })
+                        }
+                        else {
+                            await campaignModel.findOneAndUpdate({ campaignId: task.campaignId }, { $set: { instagramPostId: res.data.id } }, { new: true })
+                            const response = await campaignModel.find({ userId: task.userId }).sort({ "date": 1 });
+                            redisClient.set(`${task.userId}`, JSON.stringify(response))
+                            await campaignModel.deleteOne({ _id: task._id })
+                        }
+                    } catch (error) {
+                        console.log(error.message)
+                    }
+                }
+            }))
+        }
+    } catch (error) {
+        console.log(error.message);
+    }
+});
+
+// '0,30 * * * *'
+cron.schedule('*/5 * * * *', async (date) => {
+    // console.log('5 min');
+    let data = (new Date(date).getTime() + 30 * 60000);
+    let ISODate = new Date(data).toISOString();
+    // console.log(ISODate)
+    const response = await automationModel.find({ date: { $lte: ISODate } });
+    // console.log(response);
+    redisClient.set("Automation_campaigns", JSON.stringify(response));
+})
+
+app.get('/logOut', async (req, res) => {
+    try {
+        res.clearCookie("fyp_auth", {
+            httpOnly: true,
+            path: "/",
+        });
+
+        res.send(JSON.stringify({ successful: "User Succesfully Logged Out" }));
+    } catch (error) {
+        console.log(error.message)
+    }
+})
 
 app.use("/graphql", graphqlHTTP((req, res) => ({
     schema: schema,

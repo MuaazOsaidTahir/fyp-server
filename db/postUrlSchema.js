@@ -7,18 +7,19 @@ const postSchema = new mongoose.Schema({
 
 const campaignsCreated = new mongoose.Schema({
     userId: String,
-    name: String,
+    campaignName: String,
     instagramPostId: String,
-    linkedinPostId: String,
+    facebookPostId: String,
     twitterPostId: String,
     date: {
         type: Date,
         default: Date.now
     },
-    created_at: {
-        type: String,
-        default: Date.now()
-    }
+    // created_at: {
+    //     type: String,
+    //     default: Date.now()
+    // },
+    campaignId: String
 })
 
 const postModel = new mongoose.model('post', postSchema);

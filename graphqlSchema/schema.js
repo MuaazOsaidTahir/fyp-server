@@ -3,9 +3,10 @@ const { userModel } = require('../db/dbSchema');
 const { GraphQLObjectType, GraphQLString, GraphQLList, GraphQLSchema } = graphql;
 const jwt = require("jsonwebtoken");
 const { postModel, campaignModel } = require('../db/postUrlSchema');
-const { getHash } = require('./functions');
+const { getHash, uploadToInsta } = require('./functions');
 const cloudinary = require('cloudinary').v2;
 const axios = require('axios');
+const { automationModel } = require('../db/automateSchema');
 
 const userSchema = new GraphQLObjectType({
     name: "userSchema",
@@ -32,16 +33,29 @@ const campaignSchema = new GraphQLObjectType({
     fields: () => ({
         id: { type: GraphQLString },
         instagramPostId: { type: GraphQLString },
-        linkedinPostId: { type: GraphQLString },
+        facebookPostId: { type: GraphQLString },
         twitterPostId: { type: GraphQLString },
         userId: { type: GraphQLString },
-        // date: { type: Gra }
+        campaignName: { type: GraphQLString },
+        date: { type: GraphQLString },
+        campaignId: { type: GraphQLString },
     })
 })
 
-function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
+const InstaautomateSchema = new GraphQLObjectType({
+    name: 'AutomateSchema',
+    fields: () => ({
+        id: { type: GraphQLString },
+        time: { type: GraphQLString },
+        InstagramToken: { type: GraphQLString },
+        instagramId: { type: GraphQLString },
+        instagramCaption: { type: GraphQLString },
+        image: { type: GraphQLString },
+        campaignId: { type: GraphQLString },
+        campaignName: { type: GraphQLString },
+        userId: { type: GraphQLString },
+    })
+})
 
 const RootQuery = new GraphQLObjectType({
     name: "RootQuery",
@@ -127,55 +141,99 @@ const MutationQuery = new GraphQLObjectType({
         },
         uploadInstagram: {
             type: campaignSchema,
-            args: { userId: { type: GraphQLString }, accessToken: { type: GraphQLString }, id: { type: GraphQLString }, image: { type: GraphQLString }, caption: { type: GraphQLString } },
+            args: { campaignName: { type: GraphQLString }, userId: { type: GraphQLString }, accessToken: { type: GraphQLString }, id: { type: GraphQLString }, image: { type: GraphQLString }, caption: { type: GraphQLString }, campaignId: { type: GraphQLString } },
             async resolve(parent, values, { redisClient }) {
                 console.log("Insta Upload")
                 // const values = JSON.parse(args.object);
                 try {
-                    const response = await axios({
-                        method: 'POST',
-                        url: `https://graph.facebook.com/v13.0/${values.id}/media?image_url=${encodeURIComponent(values.image)}&caption=${values.caption}&access_token=${values.accessToken}`
-                    })
-
-                    // console.log(response.data);
-
-                    let mediaObjectStatusCode = "IN_PROGRESS";
-
-                    while (mediaObjectStatusCode !== 'FINISHED') {
-                        const statusResponse = await axios({
-                            method: 'GET',
-                            url: `https://graph.facebook.com/v13.0/${response.data.id}?fields=status_code&access_token=${values.accessToken}`
-                        })
-
-                        // console.log(statusResponse.data.status_code);
-
-                        mediaObjectStatusCode = statusResponse.data.status_code
-
-                        await sleep(2000)
-                    }
-
-                    const publishResponse = await axios({
-                        method: "POST",
-                        url: `https://graph.facebook.com/v13.0/${values.id}/media_publish?creation_id=${response.data.id}&access_token=${values.accessToken}`
-                    })
+                    const publishResponse = await uploadToInsta(values.id, values.image, values.caption, values.accessToken)
 
                     console.log(publishResponse.data)
+                    // console.log(values.campaignId)
+                    const alreadyCampaign = await campaignModel.findOne({ campaignId: values.campaignId });
+                    console.log(alreadyCampaign)
 
-                    const campaign = new campaignModel({ userId: values.userId, instagramPostId: publishResponse.data.id })
-                    await campaign.save();
+                    if (!alreadyCampaign) {
+                        // console.log('----false----')
+                        // console.log(values.campaignId)
+                        const campaign = new campaignModel({ campaignId: values.campaignId, campaignName: values.campaignName, userId: values.userId, instagramPostId: publishResponse.data.id })
+                        await campaign.save();
+                        const response = await campaignModel.find({ userId: values.userId }).sort({ "date": 1 });
+                        redisClient.set(`${values.userId}`, JSON.stringify(response))
 
-                    const data = await redisClient.get(`${args.userId}`);
-                    if (data) {
-                        const redisData = JSON.parse(data);
-                        redisClient.set(`${values.userId}`, JSON.stringify([...redisData, campaign]))
+                        return campaign
                     }
+                    else {
+                        const updateCampaign = await campaignModel.findOneAndUpdate({ campaignId: values.campaignId }, { $set: { instagramPostId: publishResponse.data.id } }, { new: true })
 
-                    return campaign
+                        const response = await campaignModel.find({ userId: values.userId }).sort({ "date": 1 });
+                        redisClient.set(`${values.userId}`, JSON.stringify(response))
+                        return updateCampaign;
+                    }
                 } catch (error) {
                     console.log(error.message);
                 }
 
                 return null
+            }
+        },
+        automateInstagram: {
+            type: InstaautomateSchema,
+            args: { campaignName: { type: GraphQLString }, userId: { type: GraphQLString }, accessToken: { type: GraphQLString }, profileid: { type: GraphQLString }, image: { type: GraphQLString }, caption: { type: GraphQLString }, campaignId: { type: GraphQLString }, time: { type: GraphQLString } },
+            async resolve(parent, para) {
+                console.log("Automate Insta")
+
+                try {
+                    const model = new automationModel({
+                        time: Date.now() + Number(para.time),
+                        InstagramToken: para.accessToken,
+                        instagramId: para.profileid,
+                        instagramCaption: para.caption,
+                        image: para.image,
+                        campaignId: para.campaignId,
+                        campaignName: para.campaignName,
+                        userId: para.userId,
+                    })
+
+                    await model.save()
+
+                    return model;
+                } catch (error) {
+                    console.log(error.message);
+                }
+                return null
+            }
+        },
+        uploadFacebook: {
+            type: campaignSchema,
+            args: { campaignName: { type: GraphQLString }, pageId: { type: GraphQLString }, accessToken: { type: GraphQLString }, image: { type: GraphQLString }, campaignId: { type: GraphQLString }, caption: { type: GraphQLString }, userId: { type: GraphQLString } },
+            async resolve(parent, values, { redisClient }) {
+                try {
+                    // console.log(values)
+                    const alreadyCampaign = await campaignModel.findOne({ campaignId: values.campaignId });
+                    // console.log(alreadyCampaign)
+                    const res = await axios.post(`https://graph.facebook.com/${values.pageId}/photos?`, {
+                        url: values.image,
+                        access_token: values.accessToken,
+                        message: values.caption
+                    })
+                    if (alreadyCampaign) {
+                        const updateCampaign = await campaignModel.findOneAndUpdate({ campaignId: values.campaignId }, { $set: { facebookPostId: res.data.id } }, { new: true })
+                        console.log(updateCampaign)
+                        return updateCampaign
+                    }
+                    else {
+                        const campaign = new campaignModel({ campaignId: values.campaignId, campaignName: values.campaignName, userId: values.userId, facebookPostId: res.data.id })
+                        await campaign.save();
+                        const response = await campaignModel.find({ userId: values.userId }).sort({ "date": 1 });
+                        redisClient.set(`${values.userId}`, JSON.stringify(response))
+
+                        return campaign
+                    }
+                } catch (error) {
+                    console.log(error.message)
+                    return null
+                }
             }
         },
         getUserCampaigns: {
